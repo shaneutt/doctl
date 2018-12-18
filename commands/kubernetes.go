@@ -16,6 +16,7 @@ package commands
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -33,6 +34,8 @@ import (
 	"github.com/pborman/uuid"
 	"github.com/spf13/cobra"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientauthentication "k8s.io/client-go/pkg/apis/clientauthentication/v1beta1"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -144,6 +147,8 @@ func kubernetesKubeconfig() *Command {
 	}
 
 	CmdBuilder(cmd, RunKubernetesKubeconfigShow, "show <cluster-id|cluster-name>", "show a cluster's kubeconfig to standard out", Writer, aliasOpt("p", "g"))
+	cmdExecCredential := CmdBuilder(cmd, RunKubernetesKubeconfigExecCredential, "exec-credential <cluster-id>", "print a cluster's exec credential", Writer, hiddenCmd())
+	AddStringFlag(cmdExecCredential, doctl.ArgVersion, "", "", "")
 	CmdBuilder(cmd, RunKubernetesKubeconfigSave, "save <cluster-id|cluster-name>", "save a cluster's credentials to your local kubeconfig", Writer, aliasOpt("s"))
 	CmdBuilder(cmd, RunKubernetesKubeconfigRemove, "remove <cluster-id|cluster-name>", "remove a cluster's credentials from your local kubeconfig", Writer, aliasOpt("d", "rm"))
 	return cmd
@@ -393,6 +398,51 @@ func RunKubernetesKubeconfigShow(c *CmdConfig) error {
 	}
 	_, err = c.Out.Write(kubeconfig)
 	return err
+}
+
+// RunKubernetesKubeconfigExecCredential displays the exec credential
+func RunKubernetesKubeconfigExecCredential(c *CmdConfig) error {
+	if len(c.Args) != 1 {
+		return doctl.NewMissingArgsErr(c.NS)
+	}
+
+	version, err := c.Doit.GetString(c.NS, doctl.ArgVersion)
+	if err != nil {
+		return err
+	}
+
+	if version != "v1beta1" {
+		return fmt.Errorf("invalid version %q expected 'v1beta1'", version)
+	}
+
+	fmt.Fprintln(os.Stderr, "refreshing creds")
+
+	kube := c.Kubernetes()
+	clusterID, err := clusterIDize(kube, c.Args[0])
+	if err != nil {
+		return err
+	}
+
+	kubeconfig, err := kube.GetKubeConfig(clusterID)
+	if err != nil {
+		return err
+	}
+	remote, err := clientcmd.Load(kubeconfig)
+	current := remote.CurrentContext
+	context := remote.Contexts[current]
+	authInfo := remote.AuthInfos[context.AuthInfo]
+	execCredential := &clientauthentication.ExecCredential{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ExecCredential",
+			APIVersion: "client.authentication.k8s.io/v1beta1",
+		},
+		Status: &clientauthentication.ExecCredentialStatus{
+			ClientCertificateData: string(authInfo.ClientCertificateData),
+			ClientKeyData:         string(authInfo.ClientKeyData),
+			Token:                 authInfo.Token,
+		},
+	}
+	return json.NewEncoder(c.Out).Encode(execCredential)
 }
 
 // RunKubernetesKubeconfigSave retrieves an existing kubernetes config and saves it to your local kubeconfig.
